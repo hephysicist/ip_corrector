@@ -23,73 +23,55 @@ def name_parser(name: str) -> dict:
     }
     return out_dict
 
-
-
-def get_ip_correction_func(h_data, h_mc):
-    #This function performs quantile mapping of h_mc to h_data using linear interpolation within one bin
-    #Get bin edges
-    bins = h_mc.axis().edges()
-    #Calculate central values of the bins
-    bin_centers = ((bins[1:] + bins[:-1])/2)
-    #Extract mc_histogram values
-    mc_vals = h_mc.values()
-    #Extract data histogram values
-    data_vals = h_data.values()
-    #Calculate cdf for mc and perform smoothing with gaussian filter
-    mc_cdf = gaussian_filter1d(np.cumsum(mc_vals)/np.sum(mc_vals), sigma=1)
-    #Calculate cdf for data and perform smoothing with gaussian filter
-    data_cdf = gaussian_filter1d(np.cumsum(data_vals)/np.sum(data_vals), sigma=1)
-    
-    def make_quantile_mapping(ip_val,
+def make_quantile_mapping(raw_ip_val,
                               ip_bins,
                               mc_cdf,
-                              data_cdf):
+                              data_cdf,
+                              only_formula=True):
         # Find the bin that contains ip_val
-        # The reason for -1 is that the func. chooses right bin if val is located between two bins.
-        idx = np.searchsorted(ip_bins, ip_val, side="left")-1
-        bin_centers = ((ip_bins[1:] + ip_bins[:-1])/2)
+        ip_val = np.clip(raw_ip_val,ip_bins[0],ip_bins[-1])
+        
+        idx = np.searchsorted(ip_bins, ip_val, side="left")
+        idx = np.clip(idx, 0, len(mc_cdf) - 1)
         # Get correspondent mc cdf value
-        # I want to approximate the function using central values of the two bins neighboring to the one containing val.
-        if idx > 0 and idx < (mc_cdf.shape[0] - 1):
-            # calculate local slope the mc cdf
-            k_cdf2ip = (mc_cdf[idx+1] - mc_cdf[idx-1]) / (bin_centers[idx+1]-bin_centers[idx-1])
-            # Calculate mc cdf value corresponding to the ip_mc_val using linear approximation
-            mc_cdf_val = mc_cdf[idx-1] + k_cdf2ip*(ip_val-bin_centers[idx-1])
-            #Generate interpolation formula for mc bins
-            mc_formula_str = f'{mc_cdf[idx-1]} + {k_cdf2ip}*(x-({bin_centers[idx-1]}))'
-        elif idx==0:
-            #If the first bin is taken, then do not perform interpolation, and take its value
-            mc_cdf_val = mc_cdf[idx]
-            mc_formula_str = str(mc_cdf[idx])
-        else:
-            #Same for the last bin
-            mc_cdf_val = mc_cdf[-1]
-            mc_formula_str = str(mc_cdf[idx])
+        k_cdf2ip = (mc_cdf[idx] - mc_cdf[idx-1]) / (ip_bins[idx]-ip_bins[idx-1])
+        # Calculate mc cdf value corresponding to the ip_mc_val using linear approximation
+        mc_cdf_val = mc_cdf[idx-1] + k_cdf2ip*(ip_val-ip_bins[idx-1])
+        mc_formula_str = f'{mc_cdf[idx-1]} + {k_cdf2ip}*(x-({ip_bins[idx-1]}))'
         # Now find bin of data_cdf that has the same value as mc_cdf_val
         idy = np.searchsorted(data_cdf, mc_cdf_val, side="left")
-        if idy > 0 and idy < (data_cdf.shape[0]-1):
-            #If the bin is surrounded by other bins, then it's possible to interpolate
-            k_ip2cdf = (bin_centers[idy+1] - bin_centers[idy-1])/(data_cdf[idy+1] - data_cdf[idy-1])
-            ip_val_corr = bin_centers[idy-1] + k_ip2cdf*(mc_cdf_val - data_cdf[idy-1])
-            #Make full formula that is a composition of two linear functions
-            full_formula = f'{bin_centers[idy-1]} + {k_ip2cdf}*({mc_formula_str} - {data_cdf[idy-1]})'
-        elif idy == 0:
-            #If the first bin is taken, then do not perform interpolation, and take its value
-            ip_val_corr = bin_centers[idy]
-            full_formula = str(ip_val_corr)
-        else:
-            #Same for the last bin
-            ip_val_corr = bin_centers[-1]
-            full_formula = str(ip_val_corr)
-        return full_formula
-    #Run the quantile mapping over full range of bins (bin_centers array), other values are staying the same
+        idy = np.clip(idy, 0, len(data_cdf) - 2)
+        num = (ip_bins[idy] - ip_bins[idy-1])
+        den = (data_cdf[idy] - data_cdf[idy-1])
+        if (den!=0):
+            k_ip2cdf = (ip_bins[idy] - ip_bins[idy-1])/(data_cdf[idy] - data_cdf[idy-1])
+            ip_val_corr = ip_bins[idy-1] + k_ip2cdf*(mc_cdf_val - data_cdf[idy-1])
+            full_formula = f'{ip_bins[idy-1]} + {k_ip2cdf}*({mc_formula_str} - {data_cdf[idy-1]})'
+        if only_formula:
+            if (idx==0) or (idx == len(mc_cdf) - 1) or (den==0):
+                return 'x'
+            else:
+                return full_formula
+        else: 
+            return full_formula, ip_val_corr, {'idx': idx, 'idy':idy, 'mc_cdf_val': mc_cdf_val}
+
+def get_ip_correction_func(h_data, h_mc):
+    bins = h_mc.axis().edges()
+    mc_vals = h_mc.values()
+    mc_vals[0] = 0
+    mc_vals[-1] = 0 
+    data_vals = h_data.values()
+    data_vals[0] = 0 
+    data_vals[-1] = 0
+    mc_cdf = gaussian_filter1d(np.cumsum(mc_vals)/np.sum(mc_vals), sigma=1)
+    data_cdf = gaussian_filter1d(
+        np.cumsum(data_vals)/np.sum(data_vals), sigma=1)
+    import functools
     formula_list = list(map(functools.partial(make_quantile_mapping,
                                               ip_bins=bins,
                                               mc_cdf=mc_cdf,
-                                              data_cdf=data_cdf), bin_centers))
+                                              data_cdf=data_cdf), bins[:-1]))
     return formula_list, bins
-
-
 
 def main():
     #Update here the eras and path
